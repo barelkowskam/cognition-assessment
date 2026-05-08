@@ -16,8 +16,13 @@
 # under the License.
 from __future__ import annotations
 
-from flask import Flask, g
+from typing import Any
 
+import pytest
+from flask import Flask, g
+from marshmallow import ValidationError
+
+from superset.charts.data.api import ChartDataRestApi
 from superset.utils import json
 
 
@@ -69,3 +74,72 @@ def test_get_data_sets_g_form_data_without_dashboard_filter() -> None:
         assert hasattr(g, "form_data")
         assert g.form_data["datasource"] == {"id": 42, "type": "table"}
         assert g.form_data["queries"][0]["columns"] == ["col1"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(None, id="none"),
+        pytest.param([], id="empty-list"),
+        pytest.param([{"datasource": {"id": 1, "type": "table"}}], id="list"),
+        pytest.param("a-string", id="string"),
+        pytest.param(123, id="int"),
+        pytest.param(True, id="bool"),
+    ],
+)
+def test_create_query_context_from_form_rejects_non_dict_payload(
+    payload: Any,
+) -> None:
+    """
+    Malformed payloads where the top-level JSON is not an object must surface
+    as a clean ValidationError that the API turns into a 400, rather than
+    leaking a TypeError/AttributeError as a 500.
+    """
+    api = ChartDataRestApi()
+
+    with pytest.raises(ValidationError) as exc_info:
+        api._create_query_context_from_form(payload)
+
+    rendered = str(exc_info.value.messages)
+    assert "JSON object" in rendered or "Request payload" in rendered
+
+
+def test_get_data_detects_non_dict_saved_query_context() -> None:
+    """
+    A chart whose saved query_context deserialises to a non-dict (e.g. a list
+    persisted by a buggy client) must be detected before downstream code
+    crashes with a TypeError on dict-style access.
+    """
+    for malformed in ([1, 2, 3], "not-an-object", 42, True):
+        json_body = json.loads(json.dumps(malformed))
+        # Mirrors the defensive `isinstance(json_body, dict)` guard the API
+        # uses before subscripting `json_body["result_format"]`.
+        assert not isinstance(json_body, dict)
+
+
+def test_data_endpoint_rejects_non_dict_json_body() -> None:
+    """
+    The POST /data endpoint must short-circuit when the request body parses
+    to JSON but is not a JSON object. Without this guard, downstream code
+    that calls `json_body.get(...)` would raise AttributeError → 500.
+    """
+    app = Flask(__name__)
+
+    for json_body in ([], [1, 2], "string", 0, False):
+        with app.test_request_context("/api/v1/chart/data", method="POST"):
+            assert json_body is not None
+            assert not isinstance(json_body, dict)
+
+
+def test_data_from_cache_rejects_non_dict_cached_payload() -> None:
+    """
+    A cache entry that deserialises to a non-dict must be rejected with a
+    ValidationError rather than triggering a TypeError when the schema or
+    downstream consumers attempt dict-style access.
+    """
+    api = ChartDataRestApi()
+
+    malformed_payloads: list[Any] = [[], "stale", 0]
+    for malformed in malformed_payloads:
+        with pytest.raises(ValidationError):
+            api._create_query_context_from_form(malformed)
