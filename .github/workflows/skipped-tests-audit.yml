@@ -1,0 +1,64 @@
+name: Skipped Tests Audit
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'tests/**'
+
+permissions:
+  pull-requests: write
+
+jobs:
+  audit-skipped-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Scan for skipped tests
+        id: scan
+        run: |
+          echo "## Skipped Tests Report" > skipped_report.md
+          echo "" >> skipped_report.md
+
+          SKIP_COUNT=$(grep -rn '@pytest.mark.skip\|pytest.skip\|@unittest.skip\|unittest.skip' tests/ --include='*.py' | wc -l || true)
+          XFAIL_COUNT=$(grep -rn '@pytest.mark.xfail' tests/ --include='*.py' | wc -l || true)
+          TODO_COUNT=$(grep -rn '# TODO.*test\|# FIXME.*test' tests/ --include='*.py' -i | wc -l || true)
+
+          echo "| Category | Count |" >> skipped_report.md
+          echo "|----------|-------|" >> skipped_report.md
+          echo "| \`@pytest.mark.skip\` / \`unittest.skip\` | $SKIP_COUNT |" >> skipped_report.md
+          echo "| \`@pytest.mark.xfail\` | $XFAIL_COUNT |" >> skipped_report.md
+          echo "| TODO/FIXME test comments | $TODO_COUNT |" >> skipped_report.md
+          echo "" >> skipped_report.md
+
+          if [ "$SKIP_COUNT" -gt 0 ]; then
+            echo "<details><summary>Skipped test locations</summary>" >> skipped_report.md
+            echo "" >> skipped_report.md
+            echo '```' >> skipped_report.md
+            grep -rn '@pytest.mark.skip\|pytest.skip\|@unittest.skip\|unittest.skip' tests/ --include='*.py' | head -50 >> skipped_report.md
+            echo '```' >> skipped_report.md
+            echo "</details>" >> skipped_report.md
+          fi
+
+          echo "skip_count=$SKIP_COUNT" >> "$GITHUB_OUTPUT"
+          echo "xfail_count=$XFAIL_COUNT" >> "$GITHUB_OUTPUT"
+          echo "todo_count=$TODO_COUNT" >> "$GITHUB_OUTPUT"
+
+      - name: Comment audit report
+        if: github.event.action == 'opened'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('skipped_report.md', 'utf8');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: report
+            });
