@@ -15,6 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 from collections.abc import Iterator
+from typing import Any
 from unittest.mock import patch  # noqa: F401
 from uuid import uuid3
 
@@ -97,6 +98,74 @@ def test_post_invalid_schema(dashboard_id: int, test_client, login_as_admin):
         f"api/v1/dashboard/{dashboard_id}/permalink", json={"foo": "bar"}
     )
     assert resp.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # Wrong types for each documented state field
+        {"dataMask": "not-a-dict"},
+        {"dataMask": ["not", "a", "dict"]},
+        {"activeTabs": "not-a-list"},
+        {"activeTabs": [1, 2, 3]},
+        {"anchor": 123},
+        {"anchor": ["not", "a", "string"]},
+        {"chartStates": "not-a-dict"},
+        {"chartStates": [1, 2]},
+        # urlParams must be a list of (string, string) pairs
+        {"urlParams": "not-a-list"},
+        {"urlParams": {"foo": "bar"}},
+        {"urlParams": [["only-one"]]},
+        {"urlParams": [["a", "b", "c"]]},
+        {"urlParams": [[1, 2]]},
+    ],
+)
+def test_post_rejects_malformed_state_payloads(
+    dashboard_id: int,
+    test_client,
+    login_as_admin,
+    payload: dict[str, Any],
+) -> None:
+    """Malformed state payloads must be rejected with a 400 response.
+
+    Regression coverage for the dashboard permalink validation surface so
+    that the API does not silently accept invalid permalink state and
+    persist a broken shareable link.
+    """
+    resp = test_client.post(f"api/v1/dashboard/{dashboard_id}/permalink", json=payload)
+    assert resp.status_code == 400
+
+
+def test_post_rejects_non_object_payload(
+    dashboard_id: int, test_client, login_as_admin
+) -> None:
+    """The POST endpoint requires a JSON object as the request body."""
+    resp = test_client.post(
+        f"api/v1/dashboard/{dashboard_id}/permalink",
+        json=["not", "an", "object"],
+    )
+    assert resp.status_code == 400
+
+
+def test_get_malformed_key_returns_error(test_client, login_as_admin) -> None:
+    """A malformed permalink key must not return a 200/200-like success."""
+    resp = test_client.get("api/v1/dashboard/permalink/not-a-real-key")
+    # decode_permalink_id raises KeyValueParseKeyError for malformed keys,
+    # which the command wraps in DashboardPermalinkGetFailedError. The API
+    # must surface this as an error rather than a 2xx response.
+    assert resp.status_code >= 400
+
+
+def test_get_unknown_but_well_formed_key_returns_404(
+    permalink_salt: str, test_client, login_as_admin
+) -> None:
+    """A correctly-formed but unknown permalink key returns 404."""
+    from superset.key_value.utils import encode_permalink_key
+
+    # encode an id that does not exist in the key-value table
+    unknown_key = encode_permalink_key(key=999_999_999, salt=permalink_salt)
+    resp = test_client.get(f"api/v1/dashboard/permalink/{unknown_key}")
+    assert resp.status_code == 404
 
 
 def test_get(dashboard_id: int, permalink_salt: str, test_client, login_as_admin):
