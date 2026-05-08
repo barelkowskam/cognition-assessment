@@ -19,7 +19,9 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from superset.commands.theme.delete import DeleteThemeCommand
 from superset.commands.theme.exceptions import (
+    SystemThemeInUseError,
     SystemThemeProtectedError,
     ThemeNotFoundError,
 )
@@ -214,3 +216,167 @@ class TestSeedSystemThemesCommand:
 
         # Act & Assert
         command.validate()  # Should complete without error
+
+
+class TestDeleteThemeCommand:
+    """Unit tests for DeleteThemeCommand"""
+
+    @staticmethod
+    def _make_theme(
+        theme_id: int = 1,
+        is_system: bool = False,
+        is_system_default: bool = False,
+        is_system_dark: bool = False,
+    ) -> Mock:
+        """Build a Theme mock with the boolean flags relevant to delete validation."""
+        theme = Mock(spec=Theme)
+        theme.id = theme_id
+        theme.is_system = is_system
+        theme.is_system_default = is_system_default
+        theme.is_system_dark = is_system_dark
+        return theme
+
+    @patch("superset.commands.theme.delete.ThemeDAO")
+    def test_validate_no_themes_found(self, mock_theme_dao):
+        """Test validation fails when no themes match the requested ids"""
+        # Arrange
+        mock_theme_dao.find_by_ids.return_value = []
+        command = DeleteThemeCommand([42])
+
+        # Act & Assert
+        with pytest.raises(ThemeNotFoundError):
+            command.validate()
+        mock_theme_dao.find_by_ids.assert_called_once_with([42])
+
+    @patch("superset.commands.theme.delete.ThemeDAO")
+    def test_validate_partial_match_raises_not_found(self, mock_theme_dao):
+        """Test validation fails when only some of the requested ids exist"""
+        # Arrange — caller asked for two ids but DAO only resolves one
+        mock_theme_dao.find_by_ids.return_value = [self._make_theme(theme_id=1)]
+        command = DeleteThemeCommand([1, 2])
+
+        # Act & Assert
+        with pytest.raises(ThemeNotFoundError):
+            command.validate()
+
+    @patch("superset.commands.theme.delete.ThemeDAO")
+    def test_validate_system_theme_protection(self, mock_theme_dao):
+        """Test validation fails when any of the themes is a system theme"""
+        # Arrange
+        mock_theme_dao.find_by_ids.return_value = [
+            self._make_theme(theme_id=1),
+            self._make_theme(theme_id=2, is_system=True),
+        ]
+        command = DeleteThemeCommand([1, 2])
+
+        # Act & Assert
+        with pytest.raises(SystemThemeProtectedError):
+            command.validate()
+
+    @patch("superset.commands.theme.delete.ThemeDAO")
+    def test_validate_blocks_system_default_theme(self, mock_theme_dao):
+        """Test validation fails when a theme is set as the system default"""
+        # Arrange
+        mock_theme_dao.find_by_ids.return_value = [
+            self._make_theme(theme_id=1, is_system_default=True),
+        ]
+        command = DeleteThemeCommand([1])
+
+        # Act & Assert
+        with pytest.raises(SystemThemeInUseError):
+            command.validate()
+
+    @patch("superset.commands.theme.delete.ThemeDAO")
+    def test_validate_blocks_system_dark_theme(self, mock_theme_dao):
+        """Test validation fails when a theme is set as the system dark theme"""
+        # Arrange
+        mock_theme_dao.find_by_ids.return_value = [
+            self._make_theme(theme_id=1, is_system_dark=True),
+        ]
+        command = DeleteThemeCommand([1])
+
+        # Act & Assert
+        with pytest.raises(SystemThemeInUseError):
+            command.validate()
+
+    @patch("superset.commands.theme.delete.db")
+    @patch("superset.commands.theme.delete.ThemeDAO")
+    def test_validate_regular_theme_success(self, mock_theme_dao, mock_db):
+        """Test validation succeeds for regular (non-system, unused) themes"""
+        # Arrange
+        themes = [
+            self._make_theme(theme_id=1),
+            self._make_theme(theme_id=2),
+        ]
+        mock_theme_dao.find_by_ids.return_value = themes
+        # No dashboards reference these themes
+        dashboard_query = mock_db.session.query.return_value.filter.return_value
+        dashboard_query.all.return_value = []
+
+        command = DeleteThemeCommand([1, 2])
+
+        # Act
+        command.validate()  # Should not raise
+
+        # Assert
+        assert command._models == themes
+        assert command._dashboard_usage == {}
+        assert command.get_dashboard_usage() == {}
+
+    @patch("superset.commands.theme.delete.db")
+    @patch("superset.commands.theme.delete.ThemeDAO")
+    def test_validate_collects_dashboard_usage(self, mock_theme_dao, mock_db):
+        """Test validation populates dashboard usage for themes in use"""
+        # Arrange
+        themes = [
+            self._make_theme(theme_id=1),
+            self._make_theme(theme_id=2),
+        ]
+        mock_theme_dao.find_by_ids.return_value = themes
+        dashboard_query = mock_db.session.query.return_value.filter.return_value
+        dashboard_query.all.return_value = [
+            (1, "Sales Overview"),
+            (1, "Marketing"),
+            (2, "Engineering"),
+        ]
+
+        command = DeleteThemeCommand([1, 2])
+
+        # Act
+        command.validate()
+
+        # Assert
+        assert command.get_dashboard_usage() == {
+            1: ["Sales Overview", "Marketing"],
+            2: ["Engineering"],
+        }
+
+    @patch("superset.commands.theme.delete.db")
+    @patch("superset.commands.theme.delete.ThemeDAO")
+    def test_run_deletes_and_dissociates_dashboards(self, mock_theme_dao, mock_db):
+        """Test successful run dissociates dashboards and delegates to DAO.delete"""
+        # Arrange
+        themes = [self._make_theme(theme_id=1)]
+        mock_theme_dao.find_by_ids.return_value = themes
+        # Two dashboards currently reference theme id=1
+        dashboard_filter = mock_db.session.query.return_value.filter.return_value
+        dashboard_filter.count.return_value = 2
+        dashboard_filter.all.return_value = [
+            (1, "Sales Overview"),
+            (1, "Marketing"),
+        ]
+        dashboard_filter.update.return_value = 2
+
+        command = DeleteThemeCommand([1])
+
+        # Act
+        command.run()
+
+        # Assert — dashboards are unlinked before the delete call
+        dashboard_filter.update.assert_called_once()
+        mock_theme_dao.delete.assert_called_once_with(themes)
+
+    def test_get_dashboard_usage_defaults_to_empty(self):
+        """Test get_dashboard_usage returns an empty dict when validate hasn't run"""
+        command = DeleteThemeCommand([1])
+        assert command.get_dashboard_usage() == {}
