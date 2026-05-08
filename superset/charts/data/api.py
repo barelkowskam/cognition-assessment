@@ -173,6 +173,18 @@ class ChartDataRestApi(ChartRestApi):
                 )
             )
 
+        if not isinstance(json_body, dict):
+            logger.warning(
+                "Chart %s has malformed query context: expected JSON object, got %s",
+                pk,
+                type(json_body).__name__,
+            )
+            return self.response_400(
+                message=_(
+                    "Chart has a malformed query context. Please save the chart again."
+                )
+            )
+
         # override saved query context
         json_body["result_format"] = request.args.get(
             "format", ChartDataResultFormat.JSON
@@ -333,13 +345,17 @@ class ChartDataRestApi(ChartRestApi):
         """
         json_body = None
         if request.is_json:
-            json_body = request.json
+            # Use silent=True so a malformed JSON body returns our own friendly
+            # 400 below instead of Werkzeug's generic BadRequest response.
+            json_body = request.get_json(silent=True)
         elif request.form.get("form_data"):
             # CSV export submits regular form data
             with contextlib.suppress(TypeError, json.JSONDecodeError):
                 json_body = json.loads(request.form["form_data"])
         if json_body is None:
             return self.response_400(message=_("Request is not JSON"))
+        if not isinstance(json_body, dict):
+            return self.response_400(message=_("Request body must be a JSON object"))
 
         try:
             query_context = self._create_query_context_from_form(json_body)
@@ -425,14 +441,25 @@ class ChartDataRestApi(ChartRestApi):
         """
         try:
             cached_data = self._load_query_context_form_from_cache(cache_key)
+        except ChartDataCacheLoadError:
+            return self.response_404()
+
+        if not isinstance(cached_data, dict):
+            logger.warning(
+                "Cached query context for key %s is malformed: expected JSON "
+                "object, got %s",
+                cache_key,
+                type(cached_data).__name__,
+            )
+            return self.response_400(message=_("Cached query context is malformed"))
+
+        try:
             # Set form_data in Flask Global as it is used as a fallback
             # for async queries with jinja context
             g.form_data = cached_data
             query_context = self._create_query_context_from_form(cached_data)
             command = ChartDataCommand(query_context)
             command.validate()
-        except ChartDataCacheLoadError:
-            return self.response_404()
         except ValidationError as error:
             return self.response_400(
                 message=_("Request is incorrect: %(error)s", error=error.messages)
@@ -659,6 +686,8 @@ class ChartDataRestApi(ChartRestApi):
         :returns: The query context
         :raises ValidationError: If the request is incorrect
         """
+        if not isinstance(form_data, dict):
+            raise ValidationError("Request payload must be a JSON object")
 
         try:
             return ChartDataQueryContextSchema().load(form_data)
