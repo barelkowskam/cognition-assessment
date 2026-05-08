@@ -1,0 +1,54 @@
+name: Chart Query Validation
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'superset/charts/**'
+      - 'superset/common/query_object.py'
+      - 'superset/common/query_context*.py'
+      - 'superset/views/api.py'
+      - 'tests/unit_tests/charts/**'
+      - 'tests/unit_tests/common/**'
+
+permissions:
+  pull-requests: write
+
+jobs:
+  chart-query-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          mkdir -p superset/static
+          echo '{"GIT_SHA": "dev", "version": "dev"}' > superset/static/version_info.json
+          cd superset-core && pip install -e .
+          cd .. && pip install -e ".[dev]"
+          pip install pytest pytest-mock "numpy<2"
+
+      - name: Run chart query unit tests
+        run: |
+          python -m pytest tests/unit_tests/charts/ -v --tb=short
+
+      - name: Comment on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: '⚠️ Chart query validation tests failed. Please review the test output above for details on malformed payload handling.'
+            });
