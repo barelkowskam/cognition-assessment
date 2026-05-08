@@ -16,6 +16,7 @@
 # under the License.
 
 
+from superset.constants import RouteMethod
 from superset.themes.api import ThemeRestApi
 
 
@@ -121,3 +122,45 @@ class TestThemeRestApi:
         expected_new_fields = ["is_system", "uuid"]
         for field in expected_new_fields:
             assert field in ThemeRestApi.list_columns
+
+    def test_delete_method_registered_with_expose(self):
+        """The single-item delete endpoint is registered at /<int:pk> for DELETE.
+
+        Regression coverage for skipped integration tests in
+        tests/integration_tests/themes/api_tests.py that were marked with
+        "DELETE endpoint not properly registered due to route method exclusion".
+        Confirms the DELETE endpoint metadata is present on the class.
+        """
+        delete_fn = ThemeRestApi.__dict__["delete"]
+        urls = getattr(delete_fn, "_urls", None)
+        assert urls is not None, "delete method missing @expose registration"
+        assert ("/<int:pk>", ("DELETE",)) in urls
+
+    def test_bulk_delete_method_registered_with_expose(self):
+        """The bulk delete endpoint is registered at / for DELETE."""
+        bulk_delete_fn = ThemeRestApi.__dict__["bulk_delete"]
+        urls = getattr(bulk_delete_fn, "_urls", None)
+        assert urls is not None, "bulk_delete method missing @expose registration"
+        assert ("/", ("DELETE",)) in urls
+
+    def test_delete_and_bulk_delete_have_distinct_routes(self):
+        """The single and bulk delete endpoints expose different URL patterns."""
+        delete_urls = ThemeRestApi.__dict__["delete"]._urls
+        bulk_delete_urls = ThemeRestApi.__dict__["bulk_delete"]._urls
+        delete_paths = {url for url, _ in delete_urls}
+        bulk_paths = {url for url, _ in bulk_delete_urls}
+        assert delete_paths.isdisjoint(bulk_paths)
+
+    def test_delete_route_included_in_route_methods(self):
+        """RouteMethod.DELETE is part of include_route_methods.
+
+        The skipped integration tests claimed the DELETE endpoint was excluded
+        via include_route_methods. This test guards against that regression.
+        """
+        assert RouteMethod.DELETE in ThemeRestApi.include_route_methods
+        assert "bulk_delete" in ThemeRestApi.include_route_methods
+
+    def test_delete_method_is_callable(self):
+        """The delete method is callable on the class."""
+        assert hasattr(ThemeRestApi, "delete")
+        assert callable(ThemeRestApi.delete)
