@@ -10,22 +10,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Log issue details
+      - name: Create Devin session
+        env:
+          DEVIN_API_KEY: ${{ secrets.DEVIN_API_KEY }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
         run: |
-          echo "Issue Title: ${{ github.event.issue.title }}"
-          echo "Issue Number: ${{ github.event.issue.number }}"
-          echo "Issue Body:"
-          echo "${{ github.event.issue.body }}"
-
-      - name: Trigger Devin remediation workflow
-        run: |
-          echo "Sending issue to Devin..."
-          echo "Devin investigates issue"
-          echo "Devin creates remediation PR"
-          echo "PR sent for human review"
-
-      - name: Track remediation metrics
-        run: |
-          echo "Status: Completed"
-          echo "Output: Pull request opened"
-          echo "Estimated time saved: 4 engineering hours"
+          curl -X POST "https://api.devin.ai/v1/sessions" \
+            -H "Authorization: Bearer $DEVIN_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"prompt\": \"You are working in my fork of Apache Superset. Remediate this GitHub issue: $ISSUE_TITLE\n\nIssue URL: $ISSUE_URL\n\nIssue body:\n$ISSUE_BODY\n\nPlease investigate, implement the smallest safe fix, run targeted tests, and open a pull request for human review.\"
+            }"
