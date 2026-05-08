@@ -343,8 +343,8 @@ def test_database_connection(
     }
 
 
-@pytest.mark.skip(reason="Works locally but fails on CI")
 def test_update_with_password_mask(
+    mocker: MockerFixture,
     app: Any,
     session: Session,
     client: Any,
@@ -375,6 +375,13 @@ def test_update_with_password_mask(
     )
     db.session.add(database)
     db.session.commit()
+
+    # mock the lookup so that we don't need to include the driver
+    mocker.patch("sqlalchemy.engine.URL.get_driver_name", return_value="gsheets")
+    mocker.patch("superset.utils.log.DBEventLogger.log")
+    # the permission sync runs after the update and requires a user in the session,
+    # which is not relevant to this test
+    mocker.patch("superset.commands.database.update.SyncPermissionsCommand")
 
     client.put(
         "/api/v1/database/1",
